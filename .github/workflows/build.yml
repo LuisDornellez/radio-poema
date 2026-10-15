@@ -1,0 +1,443 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PROJ: /home/runner/proj
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create project files
+        run: |
+          mkdir -p "$PROJ"
+          cd "$PROJ"
+          cat > settings.gradle.kts <<'RADIO_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "RadioApp"
+          include(":app")
+          RADIO_EOF
+          cat > build.gradle.kts <<'RADIO_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          RADIO_EOF
+          cat > gradle.properties <<'RADIO_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          RADIO_EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'RADIO_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.radioapp.stream"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.radioapp.stream"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          RADIO_EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'RADIO_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:label="@string/app_name"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          RADIO_EOF
+          mkdir -p app/src/main/java/com/radioapp/stream
+          cat > app/src/main/java/com/radioapp/stream/MainActivity.kt <<'RADIO_EOF'
+          package com.radioapp.stream
+
+          import android.annotation.SuppressLint
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.View
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebSettings
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+
+          class MainActivity : Activity() {
+
+              companion object {
+                  private const val START_URL = "https://www.poema.co.uk/"
+                  private const val HOST = "poema.co.uk"
+
+                  // true  = la app muestra SOLO la sección de la radio (id="radio")
+                  // false = muestra la página completa
+                  private const val RADIO_ONLY = true
+
+                  // Deja visible solo el elemento #radio: oculta todo lo demás de la página
+                  // (cabecera, menú, catálogo, generadores, pie), sin tocar ventanas flotantes
+                  // (position fixed/absolute) como el chat o el reproductor emergente.
+                  private const val ISOLATE_JS = """
+          (function(){
+            var r = document.getElementById('radio');
+            if (!r) return false;
+            var skip = {SCRIPT:1, STYLE:1, LINK:1, META:1, NOSCRIPT:1};
+            var n = r;
+            while (n && n !== document.body) {
+              var p = n.parentNode;
+              Array.prototype.forEach.call(p.children, function(c){
+                if (c === n || skip[c.tagName]) return;
+                var pos = window.getComputedStyle(c).position;
+                if (pos === 'fixed' || pos === 'absolute') return;
+                c.style.setProperty('display', 'none', 'important');
+              });
+              n = p;
+            }
+            r.style.setProperty('display', 'block', 'important');
+            r.style.setProperty('min-height', '100vh', 'important');
+            r.style.setProperty('margin', '0', 'important');
+            document.body.style.setProperty('margin', '0', 'important');
+            window.scrollTo(0, 0);
+            return true;
+          })();
+          """
+              }
+
+              private lateinit var webView: WebView
+              private val handler = Handler(Looper.getMainLooper())
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  webView = WebView(this).apply {
+                      setBackgroundColor(Color.parseColor("#F7F3EC"))
+                      webChromeClient = WebChromeClient()
+                      webViewClient = object : WebViewClient() {
+
+                          override fun shouldOverrideUrlLoading(
+                              view: WebView,
+                              request: WebResourceRequest
+                          ): Boolean {
+                              val host = request.url.host ?: return false
+                              return if (host.endsWith(HOST)) {
+                                  false
+                              } else {
+                                  startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(request.url.toString())))
+                                  true
+                              }
+                          }
+
+                          override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
+                              if (RADIO_ONLY && isHome(url)) view.visibility = View.INVISIBLE
+                          }
+
+                          override fun onPageFinished(view: WebView, url: String?) {
+                              if (isHome(url)) processRadio(view, 0) else view.visibility = View.VISIBLE
+                          }
+                      }
+                      settings.apply {
+                          javaScriptEnabled = true
+                          domStorageEnabled = true
+                          mediaPlaybackRequiresUserGesture = false
+                          mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                      }
+                  }
+                  setContentView(webView)
+
+                  if (savedInstanceState == null) webView.loadUrl(START_URL) else webView.restoreState(savedInstanceState)
+              }
+
+              private fun isHome(url: String?): Boolean {
+                  val u = Uri.parse(url ?: return false)
+                  val path = u.path ?: ""
+                  return (u.host ?: "").endsWith(HOST) && (path.isEmpty() || path == "/")
+              }
+
+              private val enhanceJs: String by lazy {
+                  assets.open("enhance.js").bufferedReader().use { it.readText() }
+              }
+
+              // Aísla la radio (si RADIO_ONLY), aplica el diseño con visualizador y muestra la vista.
+              // Reintenta unas veces por si la página termina de armarse después de cargar.
+              private fun processRadio(view: WebView, attempt: Int) {
+                  val step1 = if (RADIO_ONLY) ISOLATE_JS
+                  else "(function(){return !!document.getElementById('radio');})();"
+                  view.evaluateJavascript(step1) { result ->
+                      if (result == "true") {
+                          view.evaluateJavascript(enhanceJs, null)
+                          view.visibility = View.VISIBLE
+                      } else if (attempt >= 12) {
+                          view.visibility = View.VISIBLE
+                      } else {
+                          handler.postDelayed({ processRadio(view, attempt + 1) }, 400)
+                      }
+                  }
+              }
+
+              override fun onSaveInstanceState(outState: Bundle) {
+                  super.onSaveInstanceState(outState)
+                  webView.saveState(outState)
+              }
+
+              // No se llama a webView.onPause() para que la radio siga sonando en segundo plano.
+              override fun onDestroy() {
+                  handler.removeCallbacksAndMessages(null)
+                  webView.destroy()
+                  super.onDestroy()
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onBackPressed() {
+                  if (webView.canGoBack()) webView.goBack() else moveTaskToBack(true)
+              }
+          }
+          RADIO_EOF
+          mkdir -p app/src/main/assets
+          cat > app/src/main/assets/enhance.js <<'RADIO_EOF'
+          (function () {
+            if (window.__vzDone) return true;
+            var r = document.getElementById('radio');
+            if (!r) return false;
+            window.__vzDone = true;
+
+            var css = [
+              'html,body{background:#04061a!important}#radio{background:transparent!important;color:#f5ecf3!important;padding:28px 18px 44px!important;box-sizing:border-box!important;min-height:100vh!important;text-align:center}',
+              '#radio h1:not(.cstrEmbed h1),#radio h2:not(.cstrEmbed h2),#radio h3:not(.cstrEmbed h3),#radio p:not(.cstrEmbed p),#radio li:not(.cstrEmbed li),#radio strong:not(.cstrEmbed strong){color:#f5ecf3!important}',
+              '#radio h2:not(.cstrEmbed h2){font-size:28px!important;letter-spacing:.01em;margin:6px 0 10px!important}',
+              '#radio .cstrEmbed{margin:18px auto!important;max-width:480px;border-radius:22px;overflow:hidden;box-shadow:0 0 0 1px rgba(255,255,255,.12),0 10px 40px rgba(232,30,77,.35),0 0 70px rgba(120,90,255,.25)}','#radio h2:not(.cstrEmbed h2){text-shadow:0 0 18px rgba(255,200,220,.55),0 0 40px rgba(232,30,77,.35)}','#radio p:not(.cstrEmbed p){opacity:.92}',
+                                ].join('');
+            var st = document.createElement('style');
+            st.textContent = css;
+            document.head.appendChild(st);
+
+            var anc = r.parentNode;
+            while (anc && anc !== document.documentElement) {
+              anc.style.setProperty('background', 'transparent', 'important');
+              anc = anc.parentNode;
+            }
+
+            var sky = document.createElement('canvas');
+            sky.id = 'sky-bg';
+            sky.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:-1;pointer-events:none;display:block';
+            document.body.insertBefore(sky, document.body.firstChild);
+            var sx = sky.getContext('2d');
+            var SW = 0, SH = 0, sdpr = Math.min(window.devicePixelRatio || 1, 2);
+            var stars = [], shooters = [], nextShot = 1.2, lastT = 0;
+            var starCols = ['#ffffff', '#ffffff', '#ffe9c4', '#cfe0ff'];
+
+            function buildSky() {
+              SW = window.innerWidth; SH = window.innerHeight;
+              sky.width = Math.round(SW * sdpr); sky.height = Math.round(SH * sdpr);
+              sx.setTransform(sdpr, 0, 0, sdpr, 0, 0);
+              stars = [];
+              var n = Math.round(Math.min(160, (SW * SH) / 4200));
+              for (var i = 0; i < n; i++) {
+                stars.push({
+                  x: Math.random() * SW, y: Math.random() * SH * 0.92,
+                  r: 0.4 + Math.random() * 1.2,
+                  ph: Math.random() * 6.28, sp: 0.6 + Math.random() * 1.8,
+                  c: starCols[Math.floor(Math.random() * starCols.length)]
+                });
+              }
+            }
+            buildSky();
+            window.addEventListener('resize', buildSky);
+
+            function skyFrame(ms) {
+              var t = ms / 1000, dt = Math.min(0.05, t - lastT); lastT = t;
+              var g = sx.createLinearGradient(0, 0, 0, SH);
+              g.addColorStop(0, '#04061a');
+              g.addColorStop(0.55, '#12103a');
+              g.addColorStop(1, '#3a1245');
+              sx.globalAlpha = 1;
+              sx.fillStyle = g;
+              sx.fillRect(0, 0, SW, SH);
+
+              var hz = sx.createRadialGradient(SW / 2, SH * 1.05, 0, SW / 2, SH * 1.05, SH * 0.7);
+              hz.addColorStop(0, 'rgba(232,30,77,0.30)');
+              hz.addColorStop(1, 'rgba(232,30,77,0)');
+              sx.fillStyle = hz;
+              sx.fillRect(0, 0, SW, SH);
+
+              sx.save();
+              sx.shadowColor = 'rgba(255,240,200,0.75)';
+              sx.shadowBlur = 34;
+              sx.fillStyle = '#fff6dc';
+              sx.beginPath();
+              sx.arc(SW * 0.82, SH * 0.1, 17, 0, 6.2832);
+              sx.fill();
+              sx.restore();
+
+              for (var i = 0; i < stars.length; i++) {
+                var s = stars[i];
+                var a = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t * s.sp + s.ph));
+                sx.fillStyle = s.c;
+                sx.globalAlpha = a;
+                sx.beginPath(); sx.arc(s.x, s.y, s.r, 0, 6.2832); sx.fill();
+                if (s.r > 1.1) {
+                  sx.globalAlpha = a * 0.15;
+                  sx.beginPath(); sx.arc(s.x, s.y, s.r * 3.2, 0, 6.2832); sx.fill();
+                }
+              }
+              sx.globalAlpha = 1;
+
+              if (t > nextShot) {
+                shooters.push({
+                  x: SW * 0.15 + Math.random() * SW * 0.85, y: Math.random() * SH * 0.35,
+                  vx: -(380 + Math.random() * 240), vy: 190 + Math.random() * 130,
+                  life: 0, max: 0.9 + Math.random() * 0.5
+                });
+                nextShot = t + 1.8 + Math.random() * 3.6;
+              }
+              for (var j = shooters.length - 1; j >= 0; j--) {
+                var p = shooters[j];
+                p.life += dt; p.x += p.vx * dt; p.y += p.vy * dt;
+                if (p.life > p.max) { shooters.splice(j, 1); continue; }
+                var al = Math.sin(Math.PI * p.life / p.max);
+                var tx = p.x - p.vx * 0.13, ty = p.y - p.vy * 0.13;
+                var lg = sx.createLinearGradient(tx, ty, p.x, p.y);
+                lg.addColorStop(0, 'rgba(255,255,255,0)');
+                lg.addColorStop(1, 'rgba(255,255,255,' + (0.95 * al).toFixed(3) + ')');
+                sx.strokeStyle = lg; sx.lineWidth = 2; sx.lineCap = 'round';
+                sx.beginPath(); sx.moveTo(tx, ty); sx.lineTo(p.x, p.y); sx.stroke();
+                sx.fillStyle = 'rgba(255,255,255,' + al.toFixed(3) + ')';
+                sx.beginPath(); sx.arc(p.x, p.y, 1.8, 0, 6.2832); sx.fill();
+              }
+              requestAnimationFrame(skyFrame);
+            }
+            requestAnimationFrame(skyFrame);
+
+            return true;
+          })();
+          RADIO_EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'RADIO_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Antología Poética Radio</string>
+          </resources>
+          RADIO_EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/colors.xml <<'RADIO_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">#E81E4D</color>
+          </resources>
+          RADIO_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'RADIO_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M44,34 L44,74 L76,54 Z" />
+          </vector>
+          RADIO_EOF
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'RADIO_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          RADIO_EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        run: |
+          cd "$PROJ"
+          gradle assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadioApp-debug
+          path: /home/runner/proj/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Create release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /home/runner/proj/app/build/outputs/apk/debug/app-debug.apk
